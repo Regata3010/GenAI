@@ -299,21 +299,54 @@ def retrieve_candidates(vs, criteria: str, pos: str, k: int = 80) -> list:
 
 
 def build_squad(candidates_by_pos: dict, budget=None) -> tuple[list, list]:
-    squad, report = [], []
-    for pos, (mn, mx) in POSITION_SLOTS.items():
-        pool     = sorted(candidates_by_pos.get(pos,[]), key=composite_score, reverse=True)
+    squad = []
+    seen  = set()  # prevent duplicate players across position pools
+
+    # Pass 1 — fill minimum slots for every position first so that no position
+    # is starved of its minimum because an earlier position exhausted the budget.
+    for pos, (mn, _) in POSITION_SLOTS.items():
+        pool     = sorted(candidates_by_pos.get(pos, []), key=composite_score, reverse=True)
         selected = 0
         for p in pool:
-            if selected >= mx: break
+            if selected >= mn:
+                break
+            if p["player"] in seen:
+                continue
             if budget is not None:
                 spent = sum(x["market_value"] for x in squad)
-                if spent + p.get("market_value",0) > budget:
+                if spent + p.get("market_value", 0) > budget:
                     continue
-            squad.append({**p, "slot_pos": pos, "score": round(composite_score(p),2)})
+            squad.append({**p, "slot_pos": pos, "score": round(composite_score(p), 2)})
+            seen.add(p["player"])
             selected += 1
-        icon = "[OK]" if selected >= mn else "[!]"
-        report.append(f"{icon} {pos}: {selected}/{mn}-{mx}")
-    return squad[:MAX_SQUAD], report
+
+    # Pass 2 — fill up to maximum slots with remaining budget and squad space.
+    for pos, (_, mx) in POSITION_SLOTS.items():
+        already  = sum(1 for x in squad if x["slot_pos"] == pos)
+        pool     = sorted(candidates_by_pos.get(pos, []), key=composite_score, reverse=True)
+        selected = already
+        for p in pool:
+            if selected >= mx:
+                break
+            if len(squad) >= MAX_SQUAD:
+                break
+            if p["player"] in seen:
+                continue
+            if budget is not None:
+                spent = sum(x["market_value"] for x in squad)
+                if spent + p.get("market_value", 0) > budget:
+                    continue
+            squad.append({**p, "slot_pos": pos, "score": round(composite_score(p), 2)})
+            seen.add(p["player"])
+            selected += 1
+
+    report = []
+    for pos, (mn, mx) in POSITION_SLOTS.items():
+        count = sum(1 for x in squad if x["slot_pos"] == pos)
+        icon  = "[OK]" if count >= mn else "[!]"
+        report.append(f"{icon} {pos}: {count}/{mn}-{mx}")
+
+    return squad, report
 
 
 def llm_justify(squad: list, criteria: str, llm) -> str:
