@@ -295,32 +295,45 @@ def retrieve_candidates(vs, criteria: str, pos: str, k: int = 80) -> list:
     query   = f"{pos_prefix.get(pos,'')} {criteria}".strip()
     results = vs.similarity_search(query, k=k)
     cands   = [r.metadata for r in results]
-    return [c for c in cands if pos.upper() in c.get("pos","").upper()]
+    # Filter by primary_pos (first listed position) so dual-position players
+    # e.g. "FW,DF" only appear in the FW pool, not the DF pool.
+    # This prevents wrong-position assignments and cross-pool duplicates.
+    return [c for c in cands if c.get("primary_pos","").upper() == pos.upper()]
 
 
 def build_squad(candidates_by_pos: dict, budget=None) -> tuple[list, list]:
     squad = []
     seen  = set()  # prevent duplicate players across position pools
 
-    # Pass 1 — fill minimum slots for every position first so that no position
-    # is starved of its minimum because an earlier position exhausted the budget.
+    # Proportional budget reservation per position for pass 1 (minimums).
+    # Prevents early positions from exhausting the budget before later positions
+    # can fill their minimum slots.
+    # e.g. €500M budget, 17 total min slots → GK gets €88M, DF €147M, MF €147M, FW €118M
+    total_min_slots = sum(mn for mn, _ in POSITION_SLOTS.values())  # 3+5+5+4 = 17
+    pos_budget = {
+        pos: (budget * mn / total_min_slots) if budget is not None else None
+        for pos, (mn, _) in POSITION_SLOTS.items()
+    }
+
+    # Pass 1 — fill minimum slots for every position within its budget share
     for pos, (mn, _) in POSITION_SLOTS.items():
-        pool     = sorted(candidates_by_pos.get(pos, []), key=composite_score, reverse=True)
-        selected = 0
+        pool      = sorted(candidates_by_pos.get(pos, []), key=composite_score, reverse=True)
+        selected  = 0
+        pos_spent = 0.0
         for p in pool:
             if selected >= mn:
                 break
             if p["player"] in seen:
                 continue
-            if budget is not None:
-                spent = sum(x["market_value"] for x in squad)
-                if spent + p.get("market_value", 0) > budget:
-                    continue
+            val = p.get("market_value", 0)
+            if pos_budget[pos] is not None and pos_spent + val > pos_budget[pos]:
+                continue
             squad.append({**p, "slot_pos": pos, "score": round(composite_score(p), 2)})
             seen.add(p["player"])
+            pos_spent += val
             selected += 1
 
-    # Pass 2 — fill up to maximum slots with remaining budget and squad space.
+    # Pass 2 — fill up to maximum slots using remaining global budget and squad space
     for pos, (_, mx) in POSITION_SLOTS.items():
         already  = sum(1 for x in squad if x["slot_pos"] == pos)
         pool     = sorted(candidates_by_pos.get(pos, []), key=composite_score, reverse=True)
@@ -452,13 +465,16 @@ def make_charts(squad: list):
 #  Parse user message for budget
 # ─────────────────────────────────────────────────────────────────────────────
 def extract_budget(text: str):
-    m = re.search(
+    # Use findall to scan all matches — skips age-like numbers (e.g. "under 25")
+    # and returns the first value >= 50, which will be the budget figure.
+    matches = re.findall(
         r'(?:budget|cap|under|max|less\s+than)\s*(?:\w+\s+){0,2}[€$]?\s*(\d+(?:\.\d+)?)\s*[mM]?(?:illion)?',
         text, re.I
     )
-    if m:
-        val = float(m.group(1))
-        return val
+    for val_str in matches:
+        val = float(val_str)
+        if val >= 50:
+            return val
     return None
 
 
